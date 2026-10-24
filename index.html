@@ -267,10 +267,11 @@ const FONT='"PingFang TC","Noto Sans TC","Microsoft JhengHei","Heiti TC",sans-se
 const STATUS={pre:{t:'施工前',d:'登記日期'},during:{t:'施工中',d:'開工日期'},done:{t:'完工歸檔',d:'歸檔日期'}};
 const PHASE={before:'施工前',during:'施工中',after:'施工後'};
 const CHECK=['裝修申請書已送管委會','施工保證金已收取','施工公告已張貼','電梯／公共區域防護完成','施工時段已告知鄰戶','廢棄物清運完成','完工會勘驗收','保證金已退還'];
-const DEF={communityName:'我的社區',stamp:true,maxSize:1600,quality:0.75,categories:['公用區域','專有區域']};
+const DEF={communityName:'我的社區',stamp:true,maxSize:1600,quality:0.75,categories:['公用區域','專有區域','裝潢保護']};
 const defChecks=()=>CHECK.map((t,i)=>({id:'k'+(i+1),t}));
 /* 補齊設定（舊資料沒有檢核清單時套用預設；陣列各自複製，避免改到預設值） */
 function normSettings(){const st=S.settings;st.categories=[...(st.categories||DEF.categories)];
+  if(!(st.catVer>=2)){if(!st.categories.includes('裝潢保護'))st.categories.push('裝潢保護');st.catVer=2}
   st.checks=Array.isArray(st.checks)&&st.checks.length?st.checks.map(c=>({id:c.id,t:c.t})):(Array.isArray(st.checks)?[]:defChecks())}
 /* 工程的勾選紀錄：以項目代號記錄，改文字不會掉勾 */
 function pChecks(p){if(!p.checks){p.checks={};(p.checklist||[]).forEach((v,i)=>{if(v)p.checks['k'+(i+1)]=true})}return p.checks}
@@ -476,7 +477,7 @@ function renderSettings(){
     <div class="acts"><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
     <div id="usage" class="note"></div></div>
   <div class="acts col"><button class="btn danger" data-act="wipe">清除全部資料</button></div>
-  <p class="note center">社區施工／裝潢紀錄 v1.6　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
+  <p class="note center">社區施工／裝潢紀錄 v1.7　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
   app.querySelectorAll('[data-ck]').forEach(inp=>inp.addEventListener('change',async e=>{const c=st.checks.find(x=>x.id===e.target.dataset.ck);const v=e.target.value.trim();
     if(!c)return;if(!v){e.target.value=c.t;return toast('項目不能空白；要移除請按 🗑')}c.t=v;await saveSettings();toast('已儲存',1200)}));
   $('#s-cn').addEventListener('change',async e=>{st.communityName=e.target.value.trim()||'我的社區';await saveSettings();render();toast('已儲存')});
@@ -985,7 +986,7 @@ async function checkInbox(){
 (async()=>{
   Store=LocalStore();
   await Store.init();
-  normSettings();
+  normSettings();await saveSettings();
   S.ready=true;render();
   if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol)){try{await navigator.serviceWorker.register('sw.js')}catch(e){}}
   await checkInbox();
