@@ -265,7 +265,7 @@ nav button{font-size:11px}
 <div id="mask" data-act="closesheet" hidden></div>
 <div id="sheet"></div>
 <div id="viewer" data-act="closeviewer" hidden><img alt=""><div class="cap"></div></div>
-<div id="dlg" hidden><div class="box"><p id="dlg-msg"></p><div class="acts"><button class="btn" id="dlg-no">取消</button><button class="btn pri" id="dlg-yes">確定</button></div></div></div>
+<div id="dlg" hidden><div class="box"><p id="dlg-msg"></p><input id="dlg-in" type="password" autocomplete="off" hidden style="width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;margin:0 0 14px;background:var(--field)"><div class="acts"><button class="btn" id="dlg-no">取消</button><button class="btn pri" id="dlg-yes">確定</button></div></div></div>
 <div id="cam" hidden>
   <div class="cam-top"><span id="cam-title">拍照</span><button class="cam-x" data-act="camclose" aria-label="關閉相機">✕</button></div>
   <video id="cam-video" playsinline muted autoplay></video>
@@ -339,9 +339,11 @@ function projText(p){
 }
 let toastTimer;
 function toast(msg,ms=2300){const t=$('#toast');t.textContent=msg;t.hidden=false;clearTimeout(toastTimer);if(ms)toastTimer=setTimeout(()=>t.hidden=true,ms)}
-function ask(msg,okText='確定'){return new Promise(res=>{const d=$('#dlg');$('#dlg-msg').textContent=msg;$('#dlg-yes').textContent=okText;d.hidden=false;
-  const done=v=>{d.hidden=true;$('#dlg-yes').onclick=$('#dlg-no').onclick=null;res(v)};
-  $('#dlg-yes').onclick=()=>done(true);$('#dlg-no').onclick=()=>done(false);$('#dlg-yes').focus()})}
+function ask(msg,okText='確定',input=false){return new Promise(res=>{const d=$('#dlg'),inp=$('#dlg-in');$('#dlg-msg').textContent=msg;$('#dlg-yes').textContent=okText;
+  inp.hidden=!input;inp.value='';d.hidden=false;
+  const done=v=>{d.hidden=true;inp.onkeydown=$('#dlg-yes').onclick=$('#dlg-no').onclick=null;res(v)};
+  $('#dlg-yes').onclick=()=>done(input?inp.value:true);$('#dlg-no').onclick=()=>done(input?null:false);
+  inp.onkeydown=e=>{if(e.key==='Enter')done(inp.value)};(input?inp:$('#dlg-yes')).focus()})}
 const b2d=b=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(b)});
 const d2b=d=>fetch(d).then(r=>r.blob());
 const loadImg=src=>new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=src});
@@ -393,7 +395,7 @@ function LocalStore(){
    做法：每支手機先存在自己手機（離線也能用），變更放進「待上傳佇列」，有網路時自動送到雲端，
    再把別人的變更拉回來。照片在列表用小縮圖顯示，看大圖或匯出 PDF 時才下載原圖。 */
 let RAW=null;
-const CL={cfg:null,outbox:[],syncing:false,again:false,lastPull:0,lastOk:0,state:'ok',err:'',fails:{}};
+const CL={admin:'',cfg:null,outbox:[],syncing:false,again:false,lastPull:0,lastOk:0,state:'ok',err:'',fails:{}};
 const PH_EMPTY='data:image/svg+xml;utf8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 3"><rect width="4" height="3" fill="#d5dde6"/><text x="2" y="1.8" font-size=".6" text-anchor="middle" fill="#8a97a6">⟳</text></svg>');
 const saveCloud=()=>RAW.putKV('cloud',{cfg:CL.cfg,lastPull:CL.lastPull,lastOk:CL.lastOk});
 const saveOutbox=()=>RAW.putKV('outbox',CL.outbox);
@@ -406,9 +408,9 @@ async function makeThumb(blob){
 }
 function CloudWrap(R){
   return {...R,
-    saveSettings:async st=>{await R.saveSettings(st);cq({op:'saveSettings',id:'settings'})},
+    saveSettings:async st=>{await R.saveSettings(st);cq({op:'saveSettings',id:'settings',admin:CL.admin})},
     putProject:async pj=>{await R.putProject(pj);cq({op:'saveProject',id:pj.id})},
-    delProject:async id=>{await R.delProject(id);cq({op:'deleteProject',id})},
+    delProject:async id=>{await R.delProject(id);cq({op:'deleteProject',id,admin:CL.admin})},
     async addPhoto(meta,blob){let thumb='';try{thumb=await makeThumb(blob)}catch(e){}
       const x=await R.addPhoto({...meta,thumb,updated:meta.updated||Date.now(),by:CL.cfg?CL.cfg.user:''},blob);cq({op:'uploadPhoto',id:x.id});return x},
     putPhoto:async x=>{await R.putPhoto(x);cq({op:'savePhoto',id:x.id})},
@@ -446,14 +448,14 @@ function ensureBlob(x){
 }
 async function sendOp(o){
   if(o.op==='saveProject'){const pj=proj(o.id);if(pj)await api('saveProject',{project:pj})}
-  else if(o.op==='deleteProject')await api('deleteProject',{id:o.id});
+  else if(o.op==='deleteProject')await api('deleteProject',{id:o.id,admin:o.admin||CL.admin});
   else if(o.op==='uploadPhoto'){const x=S.photos.find(y=>y.id===o.id);if(!x||!x.blob)return;
     if(!x.thumb){try{x.thumb=await makeThumb(x.blob);await RAW.putPhoto(x)}catch(e){}}
     await api('uploadPhoto',{meta:metaOf(x),thumb:x.thumb||'',data:await b2d(x.blob)})}
   else if(o.op==='savePhoto'){const x=S.photos.find(y=>y.id===o.id);if(!x)return;
     try{await api('savePhoto',{meta:metaOf(x)})}catch(e){if(e.code==='nophoto'&&x.blob)CL.outbox.push({op:'uploadPhoto',id:x.id});else throw e}}
   else if(o.op==='deletePhoto')await api('deletePhoto',{id:o.id});
-  else if(o.op==='saveSettings')await api('saveSettings',{settings:S.settings,updated:S.settings.updated||Date.now()});
+  else if(o.op==='saveSettings')await api('saveSettings',{settings:S.settings,updated:S.settings.updated||Date.now(),admin:o.admin||CL.admin});
 }
 async function sync(){
   if(!CL.cfg)return;
@@ -465,6 +467,7 @@ async function sync(){
       const o=CL.outbox[0];
       try{await sendOp(o)}
       catch(e){if(e.net||e.bad||e.code==='pin')throw e;
+        if(e.code==='admin'){toast((o.op==='deleteProject'?'工程沒有刪除：':'設定沒有儲存：')+'需要管理員密碼',4000);CL.lastPull=0;CL.outbox.shift();await saveOutbox();continue}
         const k=o.op+o.id;CL.fails[k]=(CL.fails[k]||0)+1;if(CL.fails[k]<3)throw e;
         toast('有一筆資料無法上傳，已略過：'+e.message,4000)}
       CL.outbox.shift();await saveOutbox();updPill();
@@ -481,6 +484,7 @@ async function mergePull(r){
   const pend=id=>CL.outbox.some(o=>o.id===id);
   let changed=false;
   for(const d of r.projects||[]){if(pend(d.id))continue;const i=S.projects.findIndex(x=>x.id===d.id);
+    BASE[d.id]=flatP(d);
     if(i>=0){if(JSON.stringify(S.projects[i])===JSON.stringify(d))continue;S.projects[i]=d}else S.projects.push(d);
     await RAW.putProject(d);changed=true}
   if(r.projectIds){const ids=new Set(r.projectIds);
@@ -493,6 +497,12 @@ async function mergePull(r){
   if(r.settings&&!pend('settings')){S.settings={...DEF,...r.settings};normSettings();await RAW.saveSettings(S.settings);changed=true}
   else if(!r.settingsUpdated&&!pend('settings'))cq({op:'saveSettings',id:'settings'});   // 雲端還沒有設定 → 用這支手機的
   if(changed)scheduleRender();
+}
+async function needAdmin(why){
+  if(!CL.cfg)return true;if(CL.admin)return true;
+  const v=await ask(`${why}需要管理員密碼：`,'確定',true);if(v==null||!v.trim())return false;
+  try{await api('checkAdmin',{admin:v.trim()})}catch(e){toast(e.net?'需要連上網路才能確認管理員密碼':e.message,3500);return false}
+  CL.admin=v.trim();toast('已用管理員身分解鎖（關閉 App 後要重新輸入）',3000);return true;
 }
 function pillText(){
   const n=CL.outbox.length;
@@ -559,7 +569,15 @@ function scheduleRender(){if(!S.ready)return;const a=document.activeElement;
   if(a&&app.contains(a)&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)){pendingRender=true;return}render()}
 app.addEventListener('focusout',()=>setTimeout(()=>{if(pendingRender){pendingRender=false;scheduleRender()}},0));
 
-async function saveProject(p){p.updated=Date.now();if(!proj(p.id))S.projects.push(p);await Store.putProject(p)}
+/* 逐欄合併用：記錄每個欄位最後修改時間，兩人同時改不同欄位都會保留 */
+const PFIELDS=['title','category','location','owner','ownerPhone','contractor','contractorPhone','planStart','planEnd','notes','status','dates.pre','dates.during','dates.done'];
+const BASE={};
+function flatP(p){const o={};PFIELDS.forEach(k=>{o[k]=k.startsWith('dates.')?((p.dates||{})[k.slice(6)]||''):(p[k]==null?'':p[k])});
+  Object.keys(p.checks||{}).forEach(c=>{if(p.checks[c])o['ck.'+c]=true});return o}
+async function saveProject(p){const now=Date.now(),f=flatP(p),b=BASE[p.id];p._ft=p._ft||{};
+  if(b){new Set([...Object.keys(f),...Object.keys(b)]).forEach(k=>{if(String(f[k]??'')!==String(b[k]??''))p._ft[k]=now})}
+  else Object.keys(f).forEach(k=>{if(f[k]!=='')p._ft[k]=now});
+  BASE[p.id]=f;p.updated=now;if(!proj(p.id))S.projects.push(p);await Store.putProject(p)}
 async function saveSettings(){S.settings.updated=Date.now();await Store.saveSettings(S.settings)}
 
 /* ---------- 畫面 ---------- */
@@ -656,6 +674,8 @@ function renderSettings(){
   app.innerHTML=`
   ${CL.cfg?'':'<div class="cloud local"><b></b>目前資料只存在這支手機裡（未連雲端）</div>'}
   ${cloudCard()}
+  ${CL.cfg&&!CL.admin?`<h3 class="sec">社區設定</h3><div class="card"><p class="note" style="margin-top:0">🔒 社區名稱：<b>${esc(st.communityName)}</b><br>社區名稱、照片設定、管制檢核項目、類別會影響所有人，由管理員修改。</p>
+    <div class="acts"><button class="btn" data-act="unlock">🔑 輸入管理員密碼修改</button></div></div>`:`
   <div class="card">
     <label class="f"><span>社區名稱（顯示在畫面、浮水印與 A4 紀錄表）</span><input id="s-cn" value="${esc(st.communityName)}"></label>
     <label class="sw"><input type="checkbox" id="s-stamp" ${st.stamp?'checked':''}>拍照時自動在照片上加日期時間浮水印</label>
@@ -670,7 +690,7 @@ function renderSettings(){
     <div class="acts"><button class="btn" data-act="ckreset">恢復預設項目</button></div></div>
   <h3 class="sec">類別管理</h3>
   <div class="card">${st.categories.map((c,i)=>`<div class="catrow"><span>${esc(c)}（${S.projects.filter(p=>p.category===c).length} 件）</span><button class="ib sm" data-act="delcat" data-i="${i}" aria-label="刪除類別">🗑</button></div>`).join('')}
-    <div class="logadd" style="margin-top:10px"><input id="newcat" placeholder="新增類別，例：外牆、機電設備"><button class="btn pri" data-act="addcat">新增</button></div></div>
+    <div class="logadd" style="margin-top:10px"><input id="newcat" placeholder="新增類別，例：外牆、機電設備"><button class="btn pri" data-act="addcat">新增</button></div></div>`}
   ${CL.cfg?`<h3 class="sec">備份</h3>
   <div class="card"><p class="note" style="margin-top:0">資料已存在雲端。想另外留一份，可以匯出 JSON 備份檔（含照片）。</p>
     <div class="acts"><button class="btn" data-act="share">⬇ 匯出備份</button><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
@@ -680,14 +700,14 @@ function renderSettings(){
     <div class="acts"><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
     <div id="usage" class="note"></div></div>
   <div class="acts col"><button class="btn danger" data-act="wipe">清除全部資料</button></div>`}
-  <p class="note center">社區施工／裝潢紀錄 v3.0　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
+  <p class="note center">社區施工／裝潢紀錄 v3.1　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
   const u2=$('#cl-user2');if(u2)u2.addEventListener('change',async e=>{const v=e.target.value.trim();if(!v){e.target.value=CL.cfg.user;return toast('名字不能空白')}CL.cfg.user=v;await saveCloud();toast('已更新名字',1500)});
   app.querySelectorAll('[data-ck]').forEach(inp=>inp.addEventListener('change',async e=>{const c=st.checks.find(x=>x.id===e.target.dataset.ck);const v=e.target.value.trim();
     if(!c)return;if(!v){e.target.value=c.t;return toast('項目不能空白；要移除請按 🗑')}c.t=v;await saveSettings();toast('已儲存',1200)}));
-  $('#s-cn').addEventListener('change',async e=>{st.communityName=e.target.value.trim()||'我的社區';await saveSettings();render();toast('已儲存')});
-  $('#s-stamp').addEventListener('change',async e=>{st.stamp=e.target.checked;await saveSettings();toast('已儲存')});
-  $('#s-ms').addEventListener('change',async e=>{st.maxSize=+e.target.value;await saveSettings();toast('已儲存')});
-  $('#s-q').addEventListener('change',async e=>{st.quality=+e.target.value;await saveSettings();toast('已儲存')});
+  $('#s-cn')?.addEventListener('change',async e=>{st.communityName=e.target.value.trim()||'我的社區';await saveSettings();render();toast('已儲存')});
+  $('#s-stamp')?.addEventListener('change',async e=>{st.stamp=e.target.checked;await saveSettings();toast('已儲存')});
+  $('#s-ms')?.addEventListener('change',async e=>{st.maxSize=+e.target.value;await saveSettings();toast('已儲存')});
+  $('#s-q')?.addEventListener('change',async e=>{st.quality=+e.target.value;await saveSettings();toast('已儲存')});
   Store.usage().then(u=>{const el=$('#usage');if(!el)return;
     if(!u){el.textContent='';return}
     el.textContent=`這支手機目前已使用約 ${kb(u.bytes)}`}).catch(()=>{const el=$('#usage');if(el)el.textContent=''});
@@ -1171,9 +1191,9 @@ document.body.addEventListener('click',async e=>{
       if(x)await Store.delPhoto(x);await saveProject(p);toast('已刪除');break}
     case 'addlog':{const t=$('#logtxt').value.trim();if(!t)return toast('請先輸入內容');
       p.logs=p.logs||[];p.logs.push({id:uid(),t:Date.now(),text:t});render();await saveProject(p);break}
-    case 'dellog':if(!await ask('刪除這筆日誌？','刪除'))break;p.logs=p.logs.filter(l=>l.id!==id);render();await saveProject(p);break;
+    case 'dellog':if(!await ask('刪除這筆日誌？','刪除'))break;p.logs=p.logs.filter(l=>l.id!==id);p._dl=(p._dl||[]).concat(id);render();await saveProject(p);break;
     case 'export':await exportA4(p);break;
-    case 'delproj':{const list=photosOf(p.id);if(!await ask(`確定刪除「${p.title}」？\n連同 ${list.length} 張照片會一併刪除${CL.cfg?'，雲端上大家都會看不到':''}。`,'刪除'))break;
+    case 'delproj':{if(!await needAdmin('刪除工程'))break;const list=photosOf(p.id);if(!await ask(`確定刪除「${p.title}」？\n連同 ${list.length} 張照片會一併刪除${CL.cfg?'，雲端上大家都會看不到':''}。`,'刪除'))break;
       toast('刪除中…',0);
       for(const x of list)await Store.delPhoto(x);
       S.photos=S.photos.filter(x=>x.projectId!==p.id);await Store.delProject(p.id);S.projects=S.projects.filter(x=>x.id!==p.id);
@@ -1195,6 +1215,7 @@ document.body.addEventListener('click',async e=>{
       if(!await ask(`刪除類別「${c}」？${n?`\n已有 ${n} 件工程使用，工程不會被刪除。`:''}`,'刪除'))break;
       S.settings.categories.splice(+el.dataset.i,1);if(S.fCat===c)S.fCat='all';await saveSettings();render();break}
     case 'share':openShare();break;
+    case 'unlock':if(await needAdmin('修改社區設定'))render();break;
     case 'syncnow':if(!CL.cfg)break;if(CL.state==='err'&&CL.err)toast(CL.err,3500);else toast('同步中…',1200);await sync();if(CL.state==='ok')toast('已同步',1500);break;
     case 'clconnect':await cloudConnect($('#cl-url').value,$('#cl-pin').value,$('#cl-user').value);break;
     case 'clscan':await scanQR(`<p class="p2pmsg">掃同事手機上「讓同事加入」的 QR Code</p>`,async t=>{const j=parseJoin(t);if(!j)throw new Error('這不是雲端設定的 QR Code');P2P.role=null;closeSheet();openJoin(j)},/[?&]join=/);P2P.role='scan';break;
@@ -1247,6 +1268,7 @@ async function checkInbox(){
   RAW=LocalStore();await RAW.init();Store=CloudWrap(RAW);
   try{const c=await RAW.getKV('cloud');if(c&&c.cfg){CL.cfg=c.cfg;CL.lastPull=c.lastPull||0;CL.lastOk=c.lastOk||0}CL.outbox=(await RAW.getKV('outbox'))||[]}catch(e){}
   normSettings();await RAW.saveSettings(S.settings);
+  S.projects.forEach(p=>BASE[p.id]=flatP(p));
   S.ready=true;render();
   if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol)){try{await navigator.serviceWorker.register('sw.js')}catch(e){}}
   await checkInbox();
