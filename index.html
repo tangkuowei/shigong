@@ -178,6 +178,22 @@ nav .add span{background:var(--pri);color:var(--on-pri);border-radius:50%;width:
 #toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--toast);color:var(--on-toast);padding:10px 18px;border-radius:22px;z-index:80;font-size:15px;max-width:88vw;text-align:center}
 @media (prefers-reduced-motion: reduce){#sheet{transition:none}}
 
+/* ===== App 內建相機 ===== */
+#cam{position:fixed;inset:0;z-index:65;background:#000;color:#fff;display:flex;flex-direction:column}
+#cam video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000}
+.cam-top{display:flex;align-items:center;justify-content:space-between;padding:calc(10px + env(safe-area-inset-top,0px)) 14px 10px;font-weight:700;font-size:17px}
+.cam-x{border:0;background:rgba(255,255,255,.18);color:#fff;width:40px;height:40px;border-radius:50%;font-size:18px}
+.cam-bot{display:flex;align-items:center;justify-content:space-around;padding:14px 10px 8px}
+.cam-side{border:0;background:none;color:#fff;width:76px;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:22px}
+.cam-side small{font-size:12px}
+.cam-side b{min-width:40px;height:40px;border-radius:50%;background:#ffd400;color:#000;display:flex;align-items:center;justify-content:center;font-size:17px}
+.cam-shot{width:76px;height:76px;border-radius:50%;border:4px solid #fff;background:none;padding:5px}
+.cam-shot i{display:block;width:100%;height:100%;border-radius:50%;background:#fff}
+.cam-shot:active i{transform:scale(.9)}
+.cam-shot:disabled{opacity:.4}
+.cam-alt{border:0;background:none;color:#cfd8e3;text-decoration:underline;font-size:14px;padding:6px 0 calc(12px + env(safe-area-inset-bottom,0px))}
+#cam-flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
+#cam-msg{position:absolute;left:16px;right:16px;top:40%;text-align:center;background:rgba(0,0,0,.7);padding:16px;border-radius:12px;line-height:1.7}
 /* ===== 窄螢幕防溢出（v1.6）===== */
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 body{overflow-x:hidden;font-size:15px}
@@ -248,6 +264,18 @@ nav button{font-size:11px}
 <div id="sheet"></div>
 <div id="viewer" data-act="closeviewer" hidden><img alt=""><div class="cap"></div></div>
 <div id="dlg" hidden><div class="box"><p id="dlg-msg"></p><div class="acts"><button class="btn" id="dlg-no">取消</button><button class="btn pri" id="dlg-yes">確定</button></div></div></div>
+<div id="cam" hidden>
+  <div class="cam-top"><span id="cam-title">拍照</span><button class="cam-x" data-act="camclose" aria-label="關閉相機">✕</button></div>
+  <video id="cam-video" playsinline muted autoplay></video>
+  <div id="cam-flash"></div>
+  <div id="cam-msg" hidden></div>
+  <div class="cam-bot">
+    <button class="cam-side" data-act="camflip" aria-label="切換鏡頭">🔄<small>切換鏡頭</small></button>
+    <button class="cam-shot" data-act="camshot" aria-label="拍照"><i></i></button>
+    <button class="cam-side" data-act="camdone"><b id="cam-count">0</b><small>完成</small></button>
+  </div>
+  <button class="cam-alt" data-act="camnative">改用手機內建相機</button>
+</div>
 <div id="toast" hidden></div>
 <input type="file" id="camInput" accept="image/*" capture="environment" hidden>
 <input type="file" id="galInput" accept="image/*" multiple hidden>
@@ -477,7 +505,7 @@ function renderSettings(){
     <div class="acts"><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
     <div id="usage" class="note"></div></div>
   <div class="acts col"><button class="btn danger" data-act="wipe">清除全部資料</button></div>
-  <p class="note center">社區施工／裝潢紀錄 v1.7　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
+  <p class="note center">社區施工／裝潢紀錄 v1.8　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
   app.querySelectorAll('[data-ck]').forEach(inp=>inp.addEventListener('change',async e=>{const c=st.checks.find(x=>x.id===e.target.dataset.ck);const v=e.target.value.trim();
     if(!c)return;if(!v){e.target.value=c.t;return toast('項目不能空白；要移除請按 🗑')}c.t=v;await saveSettings();toast('已儲存',1200)}));
   $('#s-cn').addEventListener('change',async e=>{st.communityName=e.target.value.trim()||'我的社區';await saveSettings();render();toast('已儲存')});
@@ -545,7 +573,7 @@ async function addFiles(files,fromCam){
   const p=proj(S.pid);if(!p||!files.length)return;
   let last=null,n=0,total=0,fail=0;
   for(let i=0;i<files.length;i++){
-    toast(`照片壓縮上傳中 ${i+1}/${files.length}…`,0);
+    toast(`照片壓縮處理中 ${i+1}/${files.length}…`,0);
     const f=files[i],t=fromCam?Date.now():(f.lastModified||Date.now());
     try{const blob=await processImage(f,t);
       const x=await Store.addPhoto({id:uid(),projectId:p.id,phase:S.phase,name:'',takenAt:t,created:Date.now()},blob);
@@ -892,6 +920,45 @@ async function p2pApplyOffer(code){
   watchConnect();
 }
 
+/* ---------- App 內建相機（可連拍；不支援時改用手機相機） ---------- */
+const CAM={stream:null,facing:'environment',n:0,size:0,busy:false,last:null};
+function camMsg(t){const m=$('#cam-msg');m.textContent=t||'';m.hidden=!t}
+async function camStart(){
+  if(CAM.stream){CAM.stream.getTracks().forEach(t=>t.stop());CAM.stream=null}
+  camMsg('');$('[data-act=camshot]').disabled=true;
+  try{CAM.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:CAM.facing},width:{ideal:2560},height:{ideal:1920}},audio:false})}
+  catch(e){camMsg(e&&e.name==='NotAllowedError'?'相機權限被拒絕。請到手機「設定」允許這個 App（或瀏覽器）使用相機，或按下方「改用手機內建相機」。':'無法開啟相機，請按下方「改用手機內建相機」。');return}
+  const v=$('#cam-video');v.srcObject=CAM.stream;try{await v.play()}catch(e){}
+  $('[data-act=camshot]').disabled=false;
+}
+async function openCamera(){
+  const p=proj(S.pid);if(!p)return;
+  if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){$('#camInput').click();return}
+  Object.assign(CAM,{n:0,size:0,busy:false,last:null});
+  $('#cam-title').textContent=`拍照：${PHASE[S.phase]}`;$('#cam-count').textContent='0';
+  $('#cam').hidden=false;await camStart();
+}
+async function camShot(){
+  const v=$('#cam-video'),p=proj(S.pid);if(CAM.busy||!p||!v.videoWidth)return;
+  CAM.busy=true;const f=$('#cam-flash');f.style.transition='none';f.style.opacity='.85';requestAnimationFrame(()=>{f.style.transition='opacity .25s';f.style.opacity='0'});
+  if(navigator.vibrate)navigator.vibrate(40);
+  try{const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);
+    const raw=await new Promise(r=>c.toBlob(r,'image/jpeg',0.92));const t=Date.now();
+    const blob=await processImage(raw,t);
+    const x=await Store.addPhoto({id:uid(),projectId:p.id,phase:S.phase,name:'',takenAt:t,created:Date.now()},blob);
+    if(!S.photos.find(y=>y.id===x.id))S.photos.push(x);CAM.n++;CAM.size+=blob.size;CAM.last=x;$('#cam-count').textContent=CAM.n;
+  }catch(e){toast('這張沒拍成功，請再按一次',2500)}
+  CAM.busy=false;
+}
+async function closeCamera(){
+  if(CAM.stream){CAM.stream.getTracks().forEach(t=>t.stop());CAM.stream=null}
+  $('#cam').hidden=true;$('#cam-video').srcObject=null;
+  const p=proj(S.pid);if(!CAM.n||!p)return;
+  if(S.phase==='during'&&p.status==='pre'){p.status='during';if(!p.dates.during)p.dates.during=today()}
+  await saveProject(p);render();toast(`已加入 ${CAM.n} 張，壓縮後共約 ${kb(CAM.size)}，可以在照片下方輸入名稱`,3500);
+  const el=CAM.last&&document.querySelector(`.ph-in[data-id="${CAM.last.id}"]`);if(el)el.scrollIntoView({block:'center',behavior:'smooth'});
+}
+
 /* ---------- 事件 ---------- */
 document.body.addEventListener('click',async e=>{
   const el=e.target.closest('[data-act]');if(!el)return;
@@ -908,7 +975,11 @@ document.body.addEventListener('click',async e=>{
     case 'fc':S.fCat=k;renderHome();break;
     case 'phase':S.phase=k;render();break;
     case 'setst':p.status=k;if(!p.dates[k])p.dates[k]=today();render();await saveProject(p);toast(`已歸入「${STATUS[k].t}」`);break;
-    case 'cam':$('#camInput').click();break;
+    case 'cam':await openCamera();break;
+    case 'camshot':await camShot();break;
+    case 'camflip':CAM.facing=CAM.facing==='environment'?'user':'environment';await camStart();break;
+    case 'camdone':case 'camclose':await closeCamera();break;
+    case 'camnative':await closeCamera();$('#camInput').click();break;
     case 'gal':$('#galInput').click();break;
     case 'view':{const x=S.photos.find(y=>y.id===id);if(!x)break;const v=$('#viewer');v.querySelector('img').src=purl(x);
       v.querySelector('.cap').innerHTML=`${esc(x.name||'（未命名）')}<small>${PHASE[x.phase]}・${fmt(x.takenAt)}</small>`;v.hidden=false;break}
