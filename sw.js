@@ -1,5 +1,5 @@
 // 社區施工裝潢紀錄：離線快取＋接收分享檔案
-const VER = 'cb-shell-v1.9';
+const VER = 'cb-shell-v2.0';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

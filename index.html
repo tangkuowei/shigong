@@ -293,7 +293,9 @@ const $=s=>document.querySelector(s);
 const app=$('#app');
 const FONT='"PingFang TC","Noto Sans TC","Microsoft JhengHei","Heiti TC",sans-serif';
 const STATUS={pre:{t:'施工前',d:'登記日期'},during:{t:'施工中',d:'開工日期'},done:{t:'完工歸檔',d:'歸檔日期'}};
-const PHASE={before:'施工前',during:'施工中',after:'施工後'};
+const PHASE={before:'施工前',during:'施工中',after:'完工歸檔'};
+/* 工程進度 ↔ 照片分頁 對應 */
+const ST2PH={pre:'before',during:'during',done:'after'};
 const CHECK=['裝修申請書已送管委會','施工保證金已收取','施工公告已張貼','電梯／公共區域防護完成','施工時段已告知鄰戶','廢棄物清運完成','完工會勘驗收','保證金已退還'];
 const DEF={communityName:'我的社區',stamp:true,maxSize:1600,quality:0.75,categories:['公用區域','專有區域','裝潢保護']};
 const defChecks=()=>CHECK.map((t,i)=>({id:'k'+(i+1),t}));
@@ -436,7 +438,7 @@ function projCard(p,ks){
    <div class="pj-bd"><div class="pj-t">${hl(p.title,ks)}</div>
     <div class="pj-s"><span class="tag">${hl(p.category,ks)}</span>${hl(who,ks)}</div>
     <div class="pj-s">${p.contractor?'🛠 '+hl(p.contractor,ks):'&nbsp;'}</div>
-    <div class="pj-f"><span class="badge st-${p.status}">${STATUS[p.status].t} ${dshow(p.dates[p.status])}</span><span class="cnt">前${c.before}・中${c.during}・後${c.after}</span></div>
+    <div class="pj-f"><span class="badge st-${p.status}">${STATUS[p.status].t} ${dshow(p.dates[p.status])}</span><span class="cnt">前${c.before}・中${c.during}・完${c.after}</span></div>
    </div></div>`;
 }
 const infoRow=(l,v)=>v?`<div class="row"><label>${l}</label><div class="v">${esc(v)}</div></div>`:'';
@@ -505,7 +507,7 @@ function renderSettings(){
     <div class="acts"><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
     <div id="usage" class="note"></div></div>
   <div class="acts col"><button class="btn danger" data-act="wipe">清除全部資料</button></div>
-  <p class="note center">社區施工／裝潢紀錄 v1.9　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
+  <p class="note center">社區施工／裝潢紀錄 v2.0　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
   app.querySelectorAll('[data-ck]').forEach(inp=>inp.addEventListener('change',async e=>{const c=st.checks.find(x=>x.id===e.target.dataset.ck);const v=e.target.value.trim();
     if(!c)return;if(!v){e.target.value=c.t;return toast('項目不能空白；要移除請按 🗑')}c.t=v;await saveSettings();toast('已儲存',1200)}));
   $('#s-cn').addEventListener('change',async e=>{st.communityName=e.target.value.trim()||'我的社區';await saveSettings();render();toast('已儲存')});
@@ -621,7 +623,7 @@ async function exportA4(p){
   newPage();
   const rows=[[['類別',p.category],['位置／戶號',p.location]],
     [['申請／反映住戶',[p.owner,p.ownerPhone].filter(Boolean).join(' ')],['施工廠商',[p.contractor,p.contractorPhone].filter(Boolean).join(' ')]],
-    [['預計工期',planText(p)],['照片數量',`前 ${ps.filter(x=>x.phase==='before').length}・中 ${ps.filter(x=>x.phase==='during').length}・後 ${ps.filter(x=>x.phase==='after').length} 張`]],
+    [['預計工期',planText(p)],['照片數量',`前 ${ps.filter(x=>x.phase==='before').length}・中 ${ps.filter(x=>x.phase==='during').length}・完 ${ps.filter(x=>x.phase==='after').length} 張`]],
     [['登記日期',dshow(p.dates.pre)],['開工日期',dshow(p.dates.during)]],
     [['完工歸檔',dshow(p.dates.done)]]];
   const rh=62,LW=230,half=CW/2;
@@ -637,9 +639,9 @@ async function exportA4(p){
     g.fillStyle='#f3f5f7';g.fillRect(X,y,cw,ih);const im=imgs[x.id];
     if(im){const s=Math.min(cw/im.width,ih/im.height),dw=im.width*s,dh=im.height*s;g.drawImage(im,X+(cw-dw)/2,y+(ih-dh)/2,dw,dh)}
     g.strokeStyle=C.line;g.lineWidth=2;g.strokeRect(X,y,cw,ih);
-    g.fillStyle=C[x.phase];rrect(g,X,y+ih+12,110,40,8);g.fill();
-    g.fillStyle='#fff';g.font=F(24,1);g.textAlign='center';g.textBaseline='middle';g.fillText(PHASE[x.phase],X+55,y+ih+33);
-    g.textAlign='left';g.fillStyle=C.sub;g.font=F(26);g.fillText(fmt(x.takenAt),X+126,y+ih+33);
+    g.fillStyle=C[x.phase];rrect(g,X,y+ih+12,128,40,8);g.fill();
+    g.fillStyle='#fff';g.font=F(24,1);g.textAlign='center';g.textBaseline='middle';g.fillText(PHASE[x.phase],X+64,y+ih+33);
+    g.textAlign='left';g.fillStyle=C.sub;g.font=F(26);g.fillText(fmt(x.takenAt),X+144,y+ih+33);
     g.fillStyle=C.txt;g.font=F(30,1);g.fillText(clip(g,x.name||'（未命名）',cw),X,y+ih+80);
   };
   for(const k of ['before','during','after']){
@@ -969,12 +971,12 @@ document.body.addEventListener('click',async e=>{
     case 'settings':S.view='settings';render();window.scrollTo(0,0);break;
     case 'new':openForm();break;
     case 'edit':openForm(p);break;
-    case 'open':S.view='project';S.pid=id;S.phase='before';render();window.scrollTo(0,0);break;
+    case 'open':{S.view='project';S.pid=id;const op=proj(id);S.phase=op&&ST2PH[op.status]||'before';render();window.scrollTo(0,0);break}
     case 'closesheet':closeSheet();break;
     case 'fs':S.fStatus=k;renderHome();break;
     case 'fc':S.fCat=k;renderHome();break;
     case 'phase':S.phase=k;render();break;
-    case 'setst':p.status=k;if(!p.dates[k])p.dates[k]=today();render();await saveProject(p);toast(`已歸入「${STATUS[k].t}」`);break;
+    case 'setst':p.status=k;if(!p.dates[k])p.dates[k]=today();S.phase=ST2PH[k];render();await saveProject(p);toast(`已歸入「${STATUS[k].t}」，下方照片已切到「${PHASE[S.phase]}」`);break;
     case 'cam':await openCamera();break;
     case 'camshot':await camShot();break;
     case 'camflip':CAM.facing=CAM.facing==='environment'?'user':'environment';await camStart();break;
