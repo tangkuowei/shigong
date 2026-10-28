@@ -210,7 +210,7 @@ main{padding-left:max(10px,env(safe-area-inset-left,0px));padding-right:max(10px
 .badge{font-size:12px;padding:2px 8px}
 .cnt{font-size:12px}
 .info .row{gap:8px}
-.info label{width:72px;font-size:13px}
+.info label{width:84px;font-size:13px}
 .steps{gap:6px}
 .step{padding:6px}
 .step button{font-size:14px;padding:8px 2px}
@@ -330,7 +330,7 @@ function hl(text,ks){
   return out+esc(text.slice(last));
 }
 function projText(p){
-  return [p.title,p.category,p.location,p.owner,p.ownerPhone,p.contractor,p.contractorPhone,p.permitNo,p.notes,STATUS[p.status]?.t,
+  return [p.title,p.category,p.location,p.owner,p.ownerPhone,p.contractor,p.contractorPhone,p.notes,STATUS[p.status]?.t,
     ...(p.logs||[]).map(l=>l.text),...photosOf(p.id).map(x=>x.name)].join(' ');
 }
 let toastTimer;
@@ -451,8 +451,8 @@ function renderProject(){
   app.innerHTML=`
   <div class="card info">
     <div class="row"><label>類別</label><select id="p-cat" data-chg="cat">${cats.map(c=>`<option ${c===p.category?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
-    ${infoRow('位置／戶號',p.location)}${infoRow('申請住戶',[p.owner,p.ownerPhone].filter(Boolean).join('　'))}
-    ${infoRow('施工廠商',[p.contractor,p.contractorPhone].filter(Boolean).join('　'))}${infoRow('申請編號',p.permitNo)}
+    ${infoRow('位置／戶號',p.location)}${infoRow('申請／反映住戶',[p.owner,p.ownerPhone].filter(Boolean).join('　'))}
+    ${infoRow('施工廠商',[p.contractor,p.contractorPhone].filter(Boolean).join('　'))}
     ${infoRow('預計工期',planText(p))}${infoRow('備註',p.notes)}
   </div>
   <h3 class="sec">工程進度（點選即可切換歸類）</h3>
@@ -505,7 +505,7 @@ function renderSettings(){
     <div class="acts"><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
     <div id="usage" class="note"></div></div>
   <div class="acts col"><button class="btn danger" data-act="wipe">清除全部資料</button></div>
-  <p class="note center">社區施工／裝潢紀錄 v1.8　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
+  <p class="note center">社區施工／裝潢紀錄 v1.9　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
   app.querySelectorAll('[data-ck]').forEach(inp=>inp.addEventListener('change',async e=>{const c=st.checks.find(x=>x.id===e.target.dataset.ck);const v=e.target.value.trim();
     if(!c)return;if(!v){e.target.value=c.t;return toast('項目不能空白；要移除請按 🗑')}c.t=v;await saveSettings();toast('已儲存',1200)}));
   $('#s-cn').addEventListener('change',async e=>{st.communityName=e.target.value.trim()||'我的社區';await saveSettings();render();toast('已儲存')});
@@ -524,20 +524,20 @@ function closeSheet(){$('#sheet').classList.remove('show');$('#mask').hidden=tru
 const fld=(n,l,v,ph='',type='text')=>`<label class="f"><span>${l}</span><input id="f-${n}" name="${n}" type="${type}" value="${esc(v)}" placeholder="${esc(ph)}"></label>`;
 function openForm(p){
   const isNew=!p;
-  const d=p||{title:'',category:S.settings.categories[0]||'公用區域',location:'',owner:'',ownerPhone:'',contractor:'',contractorPhone:'',permitNo:'',planStart:'',planEnd:'',notes:''};
-  const cats=S.settings.categories.includes(d.category)?S.settings.categories:[...S.settings.categories,d.category];
-  sheet(`<h2>${isNew?'新增工程':'編輯工程資料'}</h2><form id="pf">
+  const d=p||{title:'',category:'',location:'',owner:'',ownerPhone:'',contractor:'',contractorPhone:'',planStart:'',planEnd:'',notes:''};
+  const cats=!d.category||S.settings.categories.includes(d.category)?S.settings.categories:[...S.settings.categories,d.category];
+  sheet(`<h2>${isNew?'新增工程':'編輯工程資料'}</h2><p class="note" style="margin-top:-4px">標 <b>*</b> 為必填，其他欄位可以留白。</p><form id="pf">
+  <label class="f"><span>類別 *</span><select id="f-category" name="category">${d.category?'':'<option value="" selected disabled>請選擇類別</option>'}${cats.map(c=>`<option ${c===d.category?'selected':''}>${esc(c)}</option>`).join('')}</select></label>
   ${fld('title','工程名稱 *',d.title,'例：12F-3 室內裝修、B1 排水管更新')}
-  <label class="f"><span>類別</span><select id="f-category" name="category">${cats.map(c=>`<option ${c===d.category?'selected':''}>${esc(c)}</option>`).join('')}</select></label>
   ${fld('location','位置／戶號',d.location,'例：A棟12樓之3、一樓大廳')}
-  <div class="two">${fld('owner','申請住戶',d.owner,'姓名')}${fld('ownerPhone','住戶電話',d.ownerPhone,'','tel')}</div>
+  <div class="two">${fld('owner','申請／反映住戶',d.owner,'姓名')}${fld('ownerPhone','住戶電話',d.ownerPhone,'','tel')}</div>
   <div class="two">${fld('contractor','施工廠商',d.contractor,'公司／負責人')}${fld('contractorPhone','廠商電話',d.contractorPhone,'','tel')}</div>
-  ${fld('permitNo','申請／許可編號',d.permitNo,'選填')}
   <div class="two">${fld('planStart','預計開工',d.planStart,'','date')}${fld('planEnd','預計完工',d.planEnd,'','date')}</div>
   <label class="f"><span>備註</span><textarea id="f-notes" name="notes" rows="3" placeholder="施工範圍、注意事項…">${esc(d.notes)}</textarea></label>
   <div class="acts"><button type="button" class="btn" data-act="closesheet">取消</button><button class="btn pri" type="submit">儲存</button></div></form>`);
   $('#pf').onsubmit=async e=>{e.preventDefault();
     const fd=Object.fromEntries(new FormData(e.target));for(const k in fd)fd[k]=String(fd[k]).trim();
+    if(!fd.category)return toast('請選擇類別');
     if(!fd.title)return toast('請輸入工程名稱');
     let t=p;
     if(isNew){t={id:uid(),status:'pre',dates:{pre:today(),during:'',done:''},checks:{},logs:[],created:Date.now()};S.phase='before'}
@@ -620,15 +620,15 @@ async function exportA4(p){
   const heading=(t,color)=>{g.fillStyle=color||C.pri;g.fillRect(M,y,10,46);g.fillStyle=C.txt;g.font=F(34,1);g.textAlign='left';g.textBaseline='middle';g.fillText(t,M+26,y+24);y+=66};
   newPage();
   const rows=[[['類別',p.category],['位置／戶號',p.location]],
-    [['申請住戶',[p.owner,p.ownerPhone].filter(Boolean).join(' ')],['施工廠商',[p.contractor,p.contractorPhone].filter(Boolean).join(' ')]],
-    [['申請編號',p.permitNo],['預計工期',planText(p)]],
+    [['申請／反映住戶',[p.owner,p.ownerPhone].filter(Boolean).join(' ')],['施工廠商',[p.contractor,p.contractorPhone].filter(Boolean).join(' ')]],
+    [['預計工期',planText(p)],['照片數量',`前 ${ps.filter(x=>x.phase==='before').length}・中 ${ps.filter(x=>x.phase==='during').length}・後 ${ps.filter(x=>x.phase==='after').length} 張`]],
     [['登記日期',dshow(p.dates.pre)],['開工日期',dshow(p.dates.during)]],
-    [['完工歸檔',dshow(p.dates.done)],['照片數量',`前 ${ps.filter(x=>x.phase==='before').length}・中 ${ps.filter(x=>x.phase==='during').length}・後 ${ps.filter(x=>x.phase==='after').length} 張`]]];
-  const rh=62,LW=190,half=CW/2;
+    [['完工歸檔',dshow(p.dates.done)]]];
+  const rh=62,LW=230,half=CW/2;
   g.lineWidth=2;g.strokeStyle=C.line;g.textBaseline='middle';g.textAlign='left';
   const cellPair=(x,w,l,v,h)=>{g.fillStyle='#eef3f8';g.fillRect(x,y,LW,h);g.strokeStyle=C.line;g.lineWidth=2;g.strokeRect(x,y,LW,h);g.strokeRect(x+LW,y,w-LW,h);
     g.fillStyle=C.sub;g.font=F(28,1);g.textAlign='left';g.fillText(l,x+16,y+rh/2)};
-  rows.forEach(r=>{r.forEach(([l,v],j)=>{const x=M+j*half;cellPair(x,half,l,v,rh);g.fillStyle=C.txt;g.font=F(29);g.fillText(clip(g,v||'—',half-LW-28),x+LW+14,y+rh/2)});y+=rh});
+  rows.forEach(r=>{const w=r.length===1?CW:half;r.forEach(([l,v],j)=>{const x=M+j*half;cellPair(x,w,l,v,rh);g.fillStyle=C.txt;g.font=F(29);g.fillText(clip(g,v||'—',w-LW-28),x+LW+14,y+rh/2)});y+=rh});
   if(p.notes){g.font=F(29);const ls=wrap(g,p.notes,CW-LW-28).slice(0,5);const h=Math.max(rh,ls.length*42+20);
     cellPair(M,CW,'備註','',h);g.fillStyle=C.txt;g.font=F(29);ls.forEach((t,i)=>g.fillText(t,M+LW+14,y+31+i*42));y+=h}
   y+=34;
@@ -665,7 +665,7 @@ async function exportA4(p){
     logs.forEach(l=>{g.fillStyle=C.sub;g.font=F(25);g.textAlign='left';g.fillText(fmt(l.t),M+26,y+18);
       g.fillStyle=C.txt;g.font=F(28);g.fillText(clip(g,l.text,CW-300),M+290,y+18);y+=44});y+=20}
   need(260);heading('簽認',C.pri);
-  const sw=(CW-40)/3;['申請住戶','施工廠商','管委會／物業'].forEach((t,i)=>{const X=M+i*(sw+20);
+  const sw=(CW-40)/3;['申請／反映住戶','施工廠商','管委會／物業'].forEach((t,i)=>{const X=M+i*(sw+20);
     g.strokeStyle=C.line;g.lineWidth=2;g.strokeRect(X,y,sw,170);g.fillStyle='#eef3f8';g.fillRect(X+1,y+1,sw-2,48);
     g.fillStyle=C.sub;g.font=F(26,1);g.textAlign='center';g.fillText(t,X+sw/2,y+26);
     g.font=F(22);g.fillText('日期：　　年　　月　　日',X+sw/2,y+148)});
