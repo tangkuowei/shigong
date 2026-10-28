@@ -164,6 +164,8 @@ nav .add span{background:var(--pri);color:var(--on-pri);border-radius:50%;width:
 .ckrow{display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line)}
 .ckrow input{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--field)}
 .ib:disabled{opacity:.35}
+.pill{flex:none;border:0;border-radius:14px;padding:5px 9px;font-size:12px;font-weight:600;background:rgba(255,255,255,.18);color:#fff;white-space:nowrap}
+.pill.offline,.pill.err{background:#ffd400;color:#000}
 .cloud{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--sub);margin:4px 4px 0}
 .cloud b{width:8px;height:8px;border-radius:50%;background:var(--done);flex:none}
 .cloud.local b{background:var(--pre)}
@@ -380,8 +382,175 @@ function LocalStore(){
     async delPhoto(x){await tx('photos','readwrite',o=>o.delete(x.id));if(urls.has(x.id)){URL.revokeObjectURL(urls.get(x.id));urls.delete(x.id)}},
     url(x){if(!x.blob)return '';if(!urls.has(x.id))urls.set(x.id,URL.createObjectURL(x.blob));return urls.get(x.id)},
     getBlob:async x=>x.blob,
-    usage:async()=>{if(navigator.storage&&navigator.storage.estimate){const e=await navigator.storage.estimate();return{bytes:e.usage||0}}return null}
+    usage:async()=>{if(navigator.storage&&navigator.storage.estimate){const e=await navigator.storage.estimate();return{bytes:e.usage||0}}return null},
+    getKV:k=>tx('kv','readonly',o=>o.get(k)),
+    putKV:(k,v)=>tx('kv','readwrite',o=>o.put(v,k))
   };
+}
+
+
+/* ================= 雲端同步（Google 試算表＋雲端硬碟，透過 Apps Script） =================
+   做法：每支手機先存在自己手機（離線也能用），變更放進「待上傳佇列」，有網路時自動送到雲端，
+   再把別人的變更拉回來。照片在列表用小縮圖顯示，看大圖或匯出 PDF 時才下載原圖。 */
+let RAW=null;
+const CL={cfg:null,outbox:[],syncing:false,again:false,lastPull:0,lastOk:0,state:'ok',err:'',fails:{}};
+const PH_EMPTY='data:image/svg+xml;utf8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 3"><rect width="4" height="3" fill="#d5dde6"/><text x="2" y="1.8" font-size=".6" text-anchor="middle" fill="#8a97a6">⟳</text></svg>');
+const saveCloud=()=>RAW.putKV('cloud',{cfg:CL.cfg,lastPull:CL.lastPull,lastOk:CL.lastOk});
+const saveOutbox=()=>RAW.putKV('outbox',CL.outbox);
+const metaOf=x=>({id:x.id,projectId:x.projectId,phase:x.phase,name:x.name||'',takenAt:x.takenAt,created:x.created,updated:x.updated||x.created||Date.now(),size:x.size||0,by:x.by||''});
+async function makeThumb(blob){
+  const u=URL.createObjectURL(blob);let img;try{img=await loadImg(u)}finally{URL.revokeObjectURL(u)}
+  const sc=Math.min(1,360/Math.max(img.naturalWidth,img.naturalHeight)),c=document.createElement('canvas');
+  c.width=Math.round(img.naturalWidth*sc);c.height=Math.round(img.naturalHeight*sc);c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+  return c.toDataURL('image/jpeg',0.6);
+}
+function CloudWrap(R){
+  return {...R,
+    saveSettings:async st=>{await R.saveSettings(st);cq({op:'saveSettings',id:'settings'})},
+    putProject:async pj=>{await R.putProject(pj);cq({op:'saveProject',id:pj.id})},
+    delProject:async id=>{await R.delProject(id);cq({op:'deleteProject',id})},
+    async addPhoto(meta,blob){let thumb='';try{thumb=await makeThumb(blob)}catch(e){}
+      const x=await R.addPhoto({...meta,thumb,updated:meta.updated||Date.now(),by:CL.cfg?CL.cfg.user:''},blob);cq({op:'uploadPhoto',id:x.id});return x},
+    putPhoto:async x=>{await R.putPhoto(x);cq({op:'savePhoto',id:x.id})},
+    delPhoto:async x=>{await R.delPhoto(x);cq({op:'deletePhoto',id:x.id})},
+    url:x=>x.blob?R.url(x):(x.thumb||PH_EMPTY),
+    getBlob:async x=>{try{await ensureBlob(x)}catch(e){}return x.blob||(x.thumb?await d2b(x.thumb):new Blob([],{type:'image/jpeg'}))}
+  };
+}
+function cq(o){
+  if(!CL.cfg)return;
+  if(o.op==='deleteProject'||o.op==='deletePhoto'){
+    const neverSent=CL.outbox.some(x=>x.op==='uploadPhoto'&&x.id===o.id);
+    CL.outbox=CL.outbox.filter(x=>x.id!==o.id);
+    if(o.op==='deletePhoto'&&neverSent){saveOutbox();kick();return}
+  }else if(CL.outbox.some(x=>x.op===o.op&&x.id===o.id)){kick();return}
+  if(o.op==='savePhoto'&&CL.outbox.some(x=>x.op==='uploadPhoto'&&x.id===o.id)){kick();return}
+  CL.outbox.push(o);saveOutbox();updPill();kick();
+}
+let kickT;function kick(){clearTimeout(kickT);kickT=setTimeout(()=>sync(),1200)}
+async function api(action,body={},cfg=CL.cfg){
+  let res;
+  try{res=await fetch(cfg.url,{method:'POST',body:JSON.stringify({pin:cfg.pin,user:cfg.user,action,...body}),redirect:'follow'})}
+  catch(e){throw Object.assign(new Error('無法連線到雲端'),{net:true})}
+  let j;try{j=await res.json()}catch(e){throw Object.assign(new Error('雲端回應不正確，請確認網址是否為 Apps Script 的「網頁應用程式」網址'),{bad:true})}
+  if(!j.ok)throw Object.assign(new Error(j.err||'雲端發生錯誤'),{code:j.code});
+  return j;
+}
+const fetching=new Map();
+function ensureBlob(x){
+  if(!x||x.blob||!CL.cfg)return Promise.resolve(x&&x.blob);
+  if(fetching.has(x.id))return fetching.get(x.id);
+  const pr=(async()=>{const r=await api('getPhoto',{id:x.id});x.blob=await d2b(r.data);x.size=x.blob.size;await RAW.putPhoto(x);return x.blob})();
+  fetching.set(x.id,pr);pr.finally(()=>fetching.delete(x.id)).catch(()=>{});
+  return pr;
+}
+async function sendOp(o){
+  if(o.op==='saveProject'){const pj=proj(o.id);if(pj)await api('saveProject',{project:pj})}
+  else if(o.op==='deleteProject')await api('deleteProject',{id:o.id});
+  else if(o.op==='uploadPhoto'){const x=S.photos.find(y=>y.id===o.id);if(!x||!x.blob)return;
+    if(!x.thumb){try{x.thumb=await makeThumb(x.blob);await RAW.putPhoto(x)}catch(e){}}
+    await api('uploadPhoto',{meta:metaOf(x),thumb:x.thumb||'',data:await b2d(x.blob)})}
+  else if(o.op==='savePhoto'){const x=S.photos.find(y=>y.id===o.id);if(!x)return;
+    try{await api('savePhoto',{meta:metaOf(x)})}catch(e){if(e.code==='nophoto'&&x.blob)CL.outbox.push({op:'uploadPhoto',id:x.id});else throw e}}
+  else if(o.op==='deletePhoto')await api('deletePhoto',{id:o.id});
+  else if(o.op==='saveSettings')await api('saveSettings',{settings:S.settings,updated:S.settings.updated||Date.now()});
+}
+async function sync(){
+  if(!CL.cfg)return;
+  if(CL.syncing){CL.again=true;return}
+  if(navigator.onLine===false){CL.state='offline';updPill();return}
+  CL.syncing=true;CL.state='sync';updPill();
+  try{
+    while(CL.outbox.length){
+      const o=CL.outbox[0];
+      try{await sendOp(o)}
+      catch(e){if(e.net||e.bad||e.code==='pin')throw e;
+        const k=o.op+o.id;CL.fails[k]=(CL.fails[k]||0)+1;if(CL.fails[k]<3)throw e;
+        toast('有一筆資料無法上傳，已略過：'+e.message,4000)}
+      CL.outbox.shift();await saveOutbox();updPill();
+    }
+    const r=await api('pull',{since:CL.lastPull});
+    await mergePull(r);
+    CL.lastPull=Math.max(0,r.now-5000);CL.lastOk=Date.now();CL.state='ok';CL.err='';await saveCloud();
+  }catch(e){CL.state=e.net?'offline':'err';CL.err=e.message;if(e.code==='pin')CL.err='密碼錯誤，請到「設定」重新連線'}
+  CL.syncing=false;updPill();
+  if(S.view==='settings'){const el=$('#cl-status');if(el)el.textContent=cloudStatusText()}
+  if(CL.again){CL.again=false;kick()}
+}
+async function mergePull(r){
+  const pend=id=>CL.outbox.some(o=>o.id===id);
+  let changed=false;
+  for(const d of r.projects||[]){if(pend(d.id))continue;const i=S.projects.findIndex(x=>x.id===d.id);
+    if(i>=0){if(JSON.stringify(S.projects[i])===JSON.stringify(d))continue;S.projects[i]=d}else S.projects.push(d);
+    await RAW.putProject(d);changed=true}
+  if(r.projectIds){const ids=new Set(r.projectIds);
+    for(const x of S.projects.slice())if(!ids.has(x.id)&&!pend(x.id)){S.projects=S.projects.filter(y=>y.id!==x.id);await RAW.delProject(x.id);changed=true}}
+  for(const d of r.photos||[]){if(pend(d.id))continue;const loc=S.photos.find(x=>x.id===d.id);
+    if(loc){const keep={blob:loc.blob,thumb:d.thumb||loc.thumb};Object.assign(loc,d,keep);await RAW.putPhoto(loc)}
+    else{const x={...d};S.photos.push(x);await RAW.putPhoto(x)}changed=true}
+  if(r.photoIds){const ids=new Set(r.photoIds);
+    for(const x of S.photos.slice())if(!ids.has(x.id)&&!pend(x.id)){S.photos=S.photos.filter(y=>y.id!==x.id);await RAW.delPhoto(x);changed=true}}
+  if(r.settings&&!pend('settings')){S.settings={...DEF,...r.settings};normSettings();await RAW.saveSettings(S.settings);changed=true}
+  else if(!r.settingsUpdated&&!pend('settings'))cq({op:'saveSettings',id:'settings'});   // 雲端還沒有設定 → 用這支手機的
+  if(changed)scheduleRender();
+}
+function pillText(){
+  const n=CL.outbox.length;
+  if(CL.state==='sync')return '⟳ 同步中';
+  if(CL.state==='offline')return n?`⚠ 離線・${n} 筆待傳`:'⚠ 離線';
+  if(CL.state==='err')return '⚠ 同步失敗';
+  return n?`⇡ ${n} 筆待傳`:'☁ 已同步';
+}
+function pillShort(){const n=CL.outbox.length;return CL.state==='sync'?'⟳':CL.state==='offline'?(n?'⚠ '+n:'⚠'):CL.state==='err'?'⚠':(n?'⇡ '+n:'☁')}
+function updPill(){const b=$('#syncpill');if(b){const narrow=innerWidth<400&&S.view==='project';b.textContent=narrow?pillShort():pillText();b.title=pillText();b.className='pill '+CL.state}}
+function cloudStatusText(){return `${pillText()}${CL.lastOk?'　最後同步 '+fmt(CL.lastOk):''}${CL.err&&CL.state!=='ok'?'\n'+CL.err:''}`}
+const b64u=t=>btoa(unescape(encodeURIComponent(t))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const unb64u=t=>decodeURIComponent(escape(atob(t.replace(/-/g,'+').replace(/_/g,'/'))));
+function joinLink(){return location.origin+location.pathname+'?join='+b64u(JSON.stringify({u:CL.cfg.url,p:CL.cfg.pin}))}
+function parseJoin(text){const m=String(text).match(/[?&]join=([A-Za-z0-9_-]+)/);if(!m)return null;try{const j=JSON.parse(unb64u(m[1]));return j.u?j:null}catch(e){return null}}
+async function cloudConnect(url,pin,user){
+  url=url.trim();pin=pin.trim();user=user.trim();
+  if(!/^https:\/\/script\.google(usercontent)?\.com\//.test(url))return toast('雲端網址不正確，應該是 https://script.google.com/… 開頭',4000);
+  if(!pin)return toast('請輸入密碼');if(!user)return toast('請輸入你的名字');
+  toast('連線中…',0);
+  let r;try{r=await api('ping',{},{url,pin,user})}catch(e){return toast('連線失敗：'+e.message,4500)}
+  const hadLocal=S.projects.length,nPh=S.photos.filter(x=>x.blob).length;
+  CL.cfg={url,pin,user,name:r.name||''};CL.lastPull=0;CL.outbox=[];CL.state='ok';CL.err='';
+  await saveCloud();await saveOutbox();$('#toast').hidden=true;
+  if(hadLocal){
+    const up=await ask(`已連上雲端「${CL.cfg.name}」。\n\n這支手機原本有 ${hadLocal} 件工程、${nPh} 張照片，要上傳到雲端讓大家都看得到嗎？\n\n選「不要」的話，這支手機的舊資料會被雲端資料取代（建議先匯出備份）。`,'上傳到雲端');
+    if(up){S.projects.forEach(x=>CL.outbox.push({op:'saveProject',id:x.id}));S.photos.filter(x=>x.blob).forEach(x=>CL.outbox.push({op:'uploadPhoto',id:x.id}));await saveOutbox()}
+  }
+  render();toast('已連上雲端，開始同步',3000);await sync();
+}
+function openJoin(j){
+  S.view='settings';render();
+  const u=$('#cl-url'),pw=$('#cl-pin');if(u)u.value=j.u;if(pw)pw.value=j.p;
+  const nm=$('#cl-user');if(nm)setTimeout(()=>nm.focus(),300);
+  toast('已帶入雲端網址和密碼，請輸入你的名字後按「連線」',4500);
+}
+function cloudCard(){
+  if(!CL.cfg)return `<h3 class="sec">☁ 雲端同步</h3>
+  <div class="card"><p class="note" style="margin-top:0">連上社區的雲端試算表後，大家看到的工程和照片都一樣，不用再互傳。沒網路時也能先拍照，有網路會自動上傳。</p>
+    <label class="f"><span>雲端網址</span><input id="cl-url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
+    <div class="two"><label class="f"><span>密碼</span><input id="cl-pin" type="password" autocomplete="off"></label><label class="f"><span>你的名字</span><input id="cl-user" placeholder="例：管理員小王"></label></div>
+    <div class="acts"><button class="btn pri" data-act="clconnect">連線</button><button class="btn" data-act="clscan">📷 掃同事給的 QR</button></div></div>`;
+  return `<h3 class="sec">☁ 雲端同步</h3>
+  <div class="card"><div class="cloud"><b></b>已連上雲端試算表「${esc(CL.cfg.name||'')}」</div>
+    <p class="note" id="cl-status" style="white-space:pre-line">${esc(cloudStatusText())}</p>
+    <label class="f"><span>你的名字（會記錄在試算表的修改者欄）</span><input id="cl-user2" value="${esc(CL.cfg.user)}"></label>
+    <div class="acts"><button class="btn pri" data-act="syncnow">⟳ 立即同步</button><button class="btn" data-act="clshare">👥 讓同事加入</button></div>
+    <div class="acts"><button class="btn danger" data-act="cldisc">中斷雲端連線</button></div></div>`;
+}
+function openCloudShare(){
+  const link=joinLink();
+  sheet(`<h2>👥 讓同事加入雲端</h2>
+  <p class="note">請同事先把這個 App 裝到手機桌面，打開後到「設定 → ☁ 雲端同步」按「📷 掃同事給的 QR」，掃下面這個 QR Code，再輸入自己的名字就能連線。</p>
+  <div class="qrbox">${qrSvg(link)}</div>
+  <p class="note">Android 也可以直接用手機相機掃，或把下面的連結傳給同事點開。</p>
+  <div class="logadd"><input id="cl-link" value="${esc(link)}" readonly><button class="btn pri" data-act="clcopy">複製</button></div>
+  <div class="warn" style="background:var(--durb);color:var(--txt);border-radius:10px;padding:10px;margin-top:10px;font-size:13px">這個 QR Code 和連結含有密碼，只給管理同仁，不要貼到住戶群組。</div>
+  <div class="acts"><button class="btn" data-act="closesheet">關閉</button></div>`);
 }
 
 /* 雲端資料更新時，若使用者正在輸入，等離開輸入框再重畫 */
@@ -391,10 +560,10 @@ function scheduleRender(){if(!S.ready)return;const a=document.activeElement;
 app.addEventListener('focusout',()=>setTimeout(()=>{if(pendingRender){pendingRender=false;scheduleRender()}},0));
 
 async function saveProject(p){p.updated=Date.now();if(!proj(p.id))S.projects.push(p);await Store.putProject(p)}
-async function saveSettings(){await Store.saveSettings(S.settings)}
+async function saveSettings(){S.settings.updated=Date.now();await Store.saveSettings(S.settings)}
 
 /* ---------- 畫面 ---------- */
-function setTop(html){$('#top').innerHTML=html}
+function setTop(html){$('#top').innerHTML=html+(CL.cfg?'<button class="pill" id="syncpill" data-act="syncnow" aria-label="同步狀態"></button>':'');updPill()}
 function render(){
   $('#nav-home').classList.toggle('on',S.view==='home'||S.view==='project');
   $('#nav-settings').classList.toggle('on',S.view==='settings');
@@ -455,7 +624,7 @@ function renderProject(){
     <div class="row"><label>類別</label><select id="p-cat" data-chg="cat">${cats.map(c=>`<option ${c===p.category?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
     ${infoRow('位置／戶號',p.location)}${infoRow('申請／反映住戶',[p.owner,p.ownerPhone].filter(Boolean).join('　'))}
     ${infoRow('施工廠商',[p.contractor,p.contractorPhone].filter(Boolean).join('　'))}
-    ${infoRow('預計工期',planText(p))}${infoRow('備註',p.notes)}
+    ${infoRow('預計工期',planText(p))}${infoRow('備註',p.notes)}${CL.cfg&&p.updatedBy?infoRow('最後修改',p.updatedBy+'　'+fmt(p.updated)):''}
   </div>
   <h3 class="sec">工程進度（點選即可切換歸類）</h3>
   <div class="steps">${['pre','during','done'].map(k=>`<div class="step st-${k} ${p.status===k?'on':''}">
@@ -472,7 +641,7 @@ function renderProject(){
   <div class="card"><div class="logadd"><input id="logtxt" placeholder="例：廠商進場、會勘、住戶反映…"><button class="btn pri" data-act="addlog">新增</button></div>
     ${(p.logs||[]).slice().reverse().map(l=>`<div class="li"><span class="t">${fmt(l.t)}</span><span class="x">${esc(l.text)}</span><button data-act="dellog" data-id="${l.id}" aria-label="刪除">✕</button></div>`).join('')}
   </div>
-  <div class="acts col"><button class="btn big pri" data-act="export">🖨 匯出 A4 PDF 紀錄表</button><button class="btn" data-act="shareproj">📤 分享此工程給其他手機</button><button class="btn danger" data-act="delproj">刪除此工程</button></div>`;
+  <div class="acts col"><button class="btn big pri" data-act="export">🖨 匯出 A4 PDF 紀錄表</button>${CL.cfg?'':'<button class="btn" data-act="shareproj">📤 分享此工程給其他手機</button>'}<button class="btn danger" data-act="delproj">刪除此工程</button></div>`;
 }
 function photoCard(x){
   return `<div class="ph"><img src="${purl(x)}" loading="lazy" alt="" data-act="view" data-id="${x.id}">
@@ -485,7 +654,8 @@ function renderSettings(){
   setTop(`<div class="ttl"><small>${esc(S.settings.communityName)}</small>設定</div>`);
   const st=S.settings;
   app.innerHTML=`
-  <div class="cloud local"><b></b>不需登入任何帳號，資料只存在這支手機裡</div>
+  ${CL.cfg?'':'<div class="cloud local"><b></b>目前資料只存在這支手機裡（未連雲端）</div>'}
+  ${cloudCard()}
   <div class="card">
     <label class="f"><span>社區名稱（顯示在畫面、浮水印與 A4 紀錄表）</span><input id="s-cn" value="${esc(st.communityName)}"></label>
     <label class="sw"><input type="checkbox" id="s-stamp" ${st.stamp?'checked':''}>拍照時自動在照片上加日期時間浮水印</label>
@@ -501,13 +671,17 @@ function renderSettings(){
   <h3 class="sec">類別管理</h3>
   <div class="card">${st.categories.map((c,i)=>`<div class="catrow"><span>${esc(c)}（${S.projects.filter(p=>p.category===c).length} 件）</span><button class="ib sm" data-act="delcat" data-i="${i}" aria-label="刪除類別">🗑</button></div>`).join('')}
     <div class="logadd" style="margin-top:10px"><input id="newcat" placeholder="新增類別，例：外牆、機電設備"><button class="btn pri" data-act="addcat">新增</button></div></div>
-  <h3 class="sec">分享與備份</h3>
+  ${CL.cfg?`<h3 class="sec">備份</h3>
+  <div class="card"><p class="note" style="margin-top:0">資料已存在雲端。想另外留一份，可以匯出 JSON 備份檔（含照片）。</p>
+    <div class="acts"><button class="btn" data-act="share">⬇ 匯出備份</button><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
+    <div id="usage" class="note"></div></div>`:`<h3 class="sec">分享與備份</h3>
   <div class="card"><p class="note" style="margin-top:0">兩支手機都打開這個 App：傳送方按「分享／匯出資料」→「面對面傳送」，接收方按「接收資料」掃 QR Code，資料（含照片）就會直接傳過去。也可以存成 JSON 檔，用藍牙、AirDrop 或 LINE 傳給對方匯入。</p>
     <div class="acts"><button class="btn pri" data-act="share">📤 分享／匯出資料</button><button class="btn pri" data-act="p2precv">📡 接收資料</button></div>
     <div class="acts"><button class="btn" data-act="restore">📥 匯入 JSON 檔</button></div>
     <div id="usage" class="note"></div></div>
-  <div class="acts col"><button class="btn danger" data-act="wipe">清除全部資料</button></div>
-  <p class="note center">社區施工／裝潢紀錄 v2.0　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
+  <div class="acts col"><button class="btn danger" data-act="wipe">清除全部資料</button></div>`}
+  <p class="note center">社區施工／裝潢紀錄 v3.0　共 ${S.projects.length} 件工程・${S.photos.length} 張照片</p>`;
+  const u2=$('#cl-user2');if(u2)u2.addEventListener('change',async e=>{const v=e.target.value.trim();if(!v){e.target.value=CL.cfg.user;return toast('名字不能空白')}CL.cfg.user=v;await saveCloud();toast('已更新名字',1500)});
   app.querySelectorAll('[data-ck]').forEach(inp=>inp.addEventListener('change',async e=>{const c=st.checks.find(x=>x.id===e.target.dataset.ck);const v=e.target.value.trim();
     if(!c)return;if(!v){e.target.value=c.t;return toast('項目不能空白；要移除請按 🗑')}c.t=v;await saveSettings();toast('已儲存',1200)}));
   $('#s-cn').addEventListener('change',async e=>{st.communityName=e.target.value.trim()||'我的社區';await saveSettings();render();toast('已儲存')});
@@ -602,6 +776,10 @@ async function exportA4(p){
   const C={pri:'#1f5f8b',txt:'#1d2733',sub:'#6b7785',line:'#cfd6de',before:'#c79a00',during:'#d0602f',after:'#1e8a50',pre:'#c79a00',done:'#1e8a50'};
   const F=(s,b)=>`${b?'bold ':''}${s}px ${FONT}`;
   const ps=[];['before','during','after'].forEach(k=>ps.push(...photosOf(p.id).filter(x=>x.phase===k).sort((a,b)=>a.takenAt-b.takenAt)));
+  const missing=ps.filter(x=>!x.blob);
+  if(missing.length&&CL.cfg){let done=0;toast(`下載原圖 0/${missing.length}…`,0);
+    const q=missing.slice();await Promise.all([0,1,2].map(async()=>{while(q.length){const x=q.shift();try{await ensureBlob(x)}catch(e){}toast(`下載原圖 ${++done}/${missing.length}…`,0)}}));
+    toast('正在排版 A4 紀錄表…',0)}
   const imgs={};await Promise.all(ps.map(async x=>{try{imgs[x.id]=await loadImg(purl(x))}catch(e){}}));
   const pages=[];let g,y;
   function newPage(){
@@ -724,9 +902,9 @@ function openShare(preIds){
    ${list.map(p=>`<label class="selrow"><input type="checkbox" class="sel-p" id="sel-${p.id}" value="${p.id}" ${pre.has(p.id)?'checked':''}><span>${esc(p.title)}</span><small>${photosOf(p.id).length} 張</small></label>`).join('')}
   </div>
   <p class="note" id="sel-size"></p>
-  <div class="acts"><button class="btn pri" data-act="p2psend">📡 面對面傳送（掃 QR 直連）</button></div>
-  <div class="acts">${canShareFiles()?'<button class="btn" data-act="sendsel">📤 用藍牙／AirDrop／LINE 傳檔</button>':''}<button class="btn" data-act="savesel">⬇ 存成 JSON 檔</button></div>
-  ${canShareFiles()?'':'<p class="note">這個瀏覽器不支援直接傳送。請先「存成 JSON 檔」，再到手機的「檔案」裡把檔案用藍牙或 LINE 傳出去。</p>'}
+  ${CL.cfg?'':'<div class="acts"><button class="btn pri" data-act="p2psend">📡 面對面傳送（掃 QR 直連）</button></div>'}
+  <div class="acts">${canShareFiles()&&!CL.cfg?'<button class="btn" data-act="sendsel">📤 用藍牙／AirDrop／LINE 傳檔</button>':''}<button class="btn ${CL.cfg?'pri':''}" data-act="savesel">⬇ 存成 JSON 檔</button></div>
+  ${canShareFiles()||CL.cfg?'':'<p class="note">這個瀏覽器不支援直接傳送。請先「存成 JSON 檔」，再到手機的「檔案」裡把檔案用藍牙或 LINE 傳出去。</p>'}
   <div class="acts"><button class="btn" data-act="closesheet">取消</button></div>`);
   const upd=()=>{const ids=selIds();const n=S.photos.filter(x=>ids.includes(x.projectId));
     const sz=n.reduce((a,x)=>a+(x.size||(x.blob&&x.blob.size)||0),0)*1.37;
@@ -833,7 +1011,7 @@ function newPC(){
   return pc;
 }
 function watchConnect(){clearTimeout(P2P.watch);P2P.watch=setTimeout(()=>{if(!P2P.ch||P2P.ch.readyState!=='open')p2pFail('等太久了，沒有連上對方')},30000)}
-async function scanQR(title,onCode){
+async function scanQR(title,onCode,re=/^CB1Z?:/){
   p2pView(`${title}<div class="scan"><video id="p2p-video" playsinline muted></video></div><p class="note center" id="p2p-scanmsg">把 QR Code 對準框框</p>`);
   try{P2P.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false})}
   catch(e){$('#p2p-scanmsg').textContent='無法開啟相機。請在瀏覽器設定裡允許這個 App 使用相機，再試一次。';return}
@@ -844,7 +1022,7 @@ async function scanQR(title,onCode){
     try{if(det){const r=await det.detect(v);if(r[0])txt=r[0].rawValue}
       else if(v.videoWidth){const w=Math.min(720,v.videoWidth),h=Math.round(v.videoHeight*w/v.videoWidth);cv.width=w;cv.height=h;g.drawImage(v,0,0,w,h);
         const r=jsQR(g.getImageData(0,0,w,h).data,w,h,{inversionAttempts:'dontInvert'});if(r)txt=r.data}}catch(e){}
-    if(txt&&/^CB1Z?:/.test(txt)){stopCam();if(navigator.vibrate)navigator.vibrate(60);try{await onCode(txt)}catch(e){p2pFail(e.message||'無法讀取 QR Code')}return}
+    if(txt&&re.test(txt)){stopCam();if(navigator.vibrate)navigator.vibrate(60);try{await onCode(txt)}catch(e){p2pFail(e.message||'無法讀取 QR Code')}return}
     if(txt){const m=$('#p2p-scanmsg');if(m)m.textContent='這不是本系統的 QR Code'}
     P2P.timer=setTimeout(tick,160)};
   tick();
@@ -983,17 +1161,19 @@ document.body.addEventListener('click',async e=>{
     case 'camdone':case 'camclose':await closeCamera();break;
     case 'camnative':await closeCamera();$('#camInput').click();break;
     case 'gal':$('#galInput').click();break;
-    case 'view':{const x=S.photos.find(y=>y.id===id);if(!x)break;const v=$('#viewer');v.querySelector('img').src=purl(x);
-      v.querySelector('.cap').innerHTML=`${esc(x.name||'（未命名）')}<small>${PHASE[x.phase]}・${fmt(x.takenAt)}</small>`;v.hidden=false;break}
+    case 'view':{const x=S.photos.find(y=>y.id===id);if(!x)break;const v=$('#viewer'),im=v.querySelector('img');im.src=purl(x);
+      v.querySelector('.cap').innerHTML=`${esc(x.name||'（未命名）')}<small>${PHASE[x.phase]}・${fmt(x.takenAt)}${x.by?'・'+esc(x.by):''}${x.blob?'':'<br>正在下載原圖…'}</small>`;v.hidden=false;
+      if(!x.blob&&CL.cfg){ensureBlob(x).then(()=>{if(!v.hidden){im.src=purl(x);const sm=v.querySelector('small');if(sm)sm.innerHTML=`${PHASE[x.phase]}・${fmt(x.takenAt)}${x.by?'・'+esc(x.by):''}`}}).catch(()=>toast('原圖下載失敗，請確認網路',3000))}
+      break}
     case 'closeviewer':$('#viewer').hidden=true;break;
-    case 'delph':{if(!await ask('確定刪除這張照片？刪除後無法復原。','刪除'))break;
+    case 'delph':{if(!await ask(CL.cfg?'確定刪除這張照片？雲端上大家都會看不到。':'確定刪除這張照片？刪除後無法復原。','刪除'))break;
       const x=S.photos.find(y=>y.id===id);S.photos=S.photos.filter(y=>y.id!==id);render();
       if(x)await Store.delPhoto(x);await saveProject(p);toast('已刪除');break}
     case 'addlog':{const t=$('#logtxt').value.trim();if(!t)return toast('請先輸入內容');
       p.logs=p.logs||[];p.logs.push({id:uid(),t:Date.now(),text:t});render();await saveProject(p);break}
     case 'dellog':if(!await ask('刪除這筆日誌？','刪除'))break;p.logs=p.logs.filter(l=>l.id!==id);render();await saveProject(p);break;
     case 'export':await exportA4(p);break;
-    case 'delproj':{const list=photosOf(p.id);if(!await ask(`確定刪除「${p.title}」？\n連同 ${list.length} 張照片會一併刪除，無法復原。`,'刪除'))break;
+    case 'delproj':{const list=photosOf(p.id);if(!await ask(`確定刪除「${p.title}」？\n連同 ${list.length} 張照片會一併刪除${CL.cfg?'，雲端上大家都會看不到':''}。`,'刪除'))break;
       toast('刪除中…',0);
       for(const x of list)await Store.delPhoto(x);
       S.photos=S.photos.filter(x=>x.projectId!==p.id);await Store.delProject(p.id);S.projects=S.projects.filter(x=>x.id!==p.id);
@@ -1015,6 +1195,13 @@ document.body.addEventListener('click',async e=>{
       if(!await ask(`刪除類別「${c}」？${n?`\n已有 ${n} 件工程使用，工程不會被刪除。`:''}`,'刪除'))break;
       S.settings.categories.splice(+el.dataset.i,1);if(S.fCat===c)S.fCat='all';await saveSettings();render();break}
     case 'share':openShare();break;
+    case 'syncnow':if(!CL.cfg)break;if(CL.state==='err'&&CL.err)toast(CL.err,3500);else toast('同步中…',1200);await sync();if(CL.state==='ok')toast('已同步',1500);break;
+    case 'clconnect':await cloudConnect($('#cl-url').value,$('#cl-pin').value,$('#cl-user').value);break;
+    case 'clscan':await scanQR(`<p class="p2pmsg">掃同事手機上「讓同事加入」的 QR Code</p>`,async t=>{const j=parseJoin(t);if(!j)throw new Error('這不是雲端設定的 QR Code');P2P.role=null;closeSheet();openJoin(j)},/[?&]join=/);P2P.role='scan';break;
+    case 'clshare':openCloudShare();break;
+    case 'clcopy':{const i=$('#cl-link');try{await navigator.clipboard.writeText(i.value);toast('已複製')}catch(e){i.select();toast('請長按選取後複製')}break}
+    case 'cldisc':{const n=CL.outbox.length;if(!await ask(`中斷雲端連線？${n?`\n還有 ${n} 筆資料沒上傳，中斷後就不會上傳了。`:''}\n這支手機上的資料會保留，之後只存在這支手機。`,'中斷連線'))break;
+      CL.cfg=null;CL.outbox=[];await saveCloud();await saveOutbox();render();toast('已中斷雲端連線');break}
     case 'p2psend':{const ids=selIds();if(!ids.length)return toast('請至少勾選一件工程');await p2pStartSend(ids);break}
     case 'p2precv':await p2pStartRecv();break;
     case 'p2pscan':await p2pScanAnswer();break;
@@ -1057,12 +1244,17 @@ async function checkInbox(){
   try{await importText(text)}catch(e){toast('匯入失敗：'+e.message,4000)}
 }
 (async()=>{
-  Store=LocalStore();
-  await Store.init();
-  normSettings();await saveSettings();
+  RAW=LocalStore();await RAW.init();Store=CloudWrap(RAW);
+  try{const c=await RAW.getKV('cloud');if(c&&c.cfg){CL.cfg=c.cfg;CL.lastPull=c.lastPull||0;CL.lastOk=c.lastOk||0}CL.outbox=(await RAW.getKV('outbox'))||[]}catch(e){}
+  normSettings();await RAW.saveSettings(S.settings);
   S.ready=true;render();
   if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol)){try{await navigator.serviceWorker.register('sw.js')}catch(e){}}
   await checkInbox();
+  const j=parseJoin(location.search);if(j){try{history.replaceState(null,'',location.pathname)}catch(e){}if(!CL.cfg)openJoin(j);else toast('這支手機已經連上雲端了')}
+  if(CL.cfg)sync();
+  setInterval(()=>{if(CL.cfg&&document.visibilityState==='visible')sync()},30000);
+  addEventListener('online',()=>sync());
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')sync()});
 })().catch(e=>{app.innerHTML=`<div class="empty">無法載入資料：${esc(e&&e.message||e)}<br>請重新整理頁面；若仍無法開啟，請改用 Chrome 或 Safari，並勿使用無痕模式。</div>`});
 </script>
 </body>
